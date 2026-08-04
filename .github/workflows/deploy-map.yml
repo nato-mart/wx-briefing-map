@@ -1,0 +1,83 @@
+# .github/workflows/deploy-map.yml
+#
+# Regenerates the MSB weather map every 10 minutes and publishes it to
+# GitHub Pages. Your MSB credentials live ONLY in the repo's encrypted
+# Secrets (Settings -> Secrets and variables -> Actions), never in the code
+# or the published files.
+#
+# Required repo secrets:
+#   MSB_USER  - your MSB username
+#   MSB_PASS  - your MSB password
+#
+# One-time setup (see the notes I gave you):
+#   1. Put msb_map2.py, uk_ireland.geojson, requirements.txt in the repo root.
+#   2. Put THIS file at .github/workflows/deploy-map.yml
+#   3. Add the two secrets above.
+#   4. Settings -> Pages -> Source: "GitHub Actions".
+
+name: Build & publish MSB map
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"   # every 10 minutes (UTC)
+  workflow_dispatch:          # lets you trigger a build manually too
+
+# Only one build at a time; a new run supersedes an in-flight one.
+concurrency:
+  group: msb-map
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Generate the map
+        env:
+          MSB_USER: ${{ secrets.MSB_USER }}
+          MSB_PASS: ${{ secrets.MSB_PASS }}
+          MSB_HEADLESS: "1"
+        run: |
+          mkdir -p site
+          python msb_map2.py
+          # msb_map2.py writes maritime_patrol_map.html to /mnt/user-data/outputs
+          # when run in that environment; locally/CI it writes to OUT_PATH below.
+          # We copy whatever it produced into ./site as index.html.
+          cp uk_ireland.geojson site/ 2>/dev/null || true
+          if [ -f maritime_patrol_map.html ]; then
+            cp maritime_patrol_map.html site/index.html
+          else
+            echo "Map file not found - check the script's output path." >&2
+            exit 1
+          fi
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
