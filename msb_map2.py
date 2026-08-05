@@ -311,6 +311,17 @@ def _structured_metar(report):
     m = re.search(r"\bQ(\d{4})\b", report) or re.search(r"\b(\d{4})\s+MSL", report)
     if m:
         out.append({"label": "QNH", "value": f"{int(m.group(1))} hPa"})
+
+    # The Design app REQUIRES these four labels to exist (it does
+    # metarDecoded.find(label===X).value). Guarantee each is present; fill any
+    # the METAR didn't provide with a dash so the app never crashes.
+    have = {d["label"] for d in out}
+    for required in ("Wind", "Visibility", "Sky", "QNH"):
+        if required not in have:
+            out.append({"label": required, "value": "—"})
+    # keep a stable order: required fields first in canonical order, then extras
+    order = {"Wind": 0, "Visibility": 1, "Sky": 2, "Temp / Dewpoint": 3, "QNH": 4}
+    out.sort(key=lambda d: order.get(d["label"], 99))
     return out, issued
 
 
