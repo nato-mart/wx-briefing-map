@@ -429,15 +429,45 @@ def add_weather_layers(m):
          font-family:sans-serif;font-size:13px;background:#1a1a1a;color:#eee;
          border:1px solid #444;border-radius:6px 6px 0 0;padding:8px 10px 6px;
          box-shadow:0 2px 6px rgba(0,0,0,0.5);min-width:170px">
-      <div style="font-weight:600;font-size:11px;letter-spacing:.5px;
-           color:#aaa;margin-bottom:6px;text-transform:uppercase">Map layers</div>
-      <label style="cursor:pointer;display:flex;align-items:center;gap:6px;padding:2px 0">
-        <input type="checkbox" id="wx-radar-chk"> Rainfall
-      </label>
-      <label style="cursor:pointer;display:flex;align-items:center;gap:6px;padding:2px 0">
-        <input type="checkbox" id="wx-cloud-chk"> EUMETSAT cloud (IR)
-      </label>
+      <div id="wx-hdr" style="font-weight:600;font-size:11px;letter-spacing:.5px;
+           color:#aaa;margin-bottom:6px;text-transform:uppercase;cursor:pointer;
+           display:flex;align-items:center;justify-content:space-between;gap:8px"
+           title="Show/hide layer controls">
+        <span>Map layers</span>
+        <span id="wx-caret" style="transition:transform .15s;font-size:10px">&#9650;</span>
+      </div>
+      <div id="wx-body">
+        <label style="cursor:pointer;display:flex;align-items:center;gap:6px;padding:2px 0">
+          <input type="checkbox" id="wx-radar-chk"> Rainfall
+        </label>
+        <label style="cursor:pointer;display:flex;align-items:center;gap:6px;padding:2px 0">
+          <input type="checkbox" id="wx-cloud-chk"> EUMETSAT cloud (IR)
+        </label>
+      </div>
     </div>
+    <script>
+    window.addEventListener('load', function() {
+      function wire() {
+        var hdr = document.getElementById('wx-hdr');
+        var body = document.getElementById('wx-body');
+        var caret = document.getElementById('wx-caret');
+        var ctrl = document.getElementById('wx-controls');
+        if (!hdr || !body) { setTimeout(wire, 200); return; }
+        var collapsed = false;
+        hdr.onclick = function() {
+          collapsed = !collapsed;
+          body.style.display = collapsed ? 'none' : '';
+          caret.style.transform = collapsed ? 'rotate(180deg)' : '';
+          // also collapse the Leaflet layer-control box joined below
+          var lc = document.querySelector('.leaflet-control-layers');
+          if (lc) lc.style.display = collapsed ? 'none' : '';
+          // round the bottom of our box when the layer control is hidden
+          if (ctrl) ctrl.style.borderRadius = collapsed ? '6px' : '6px 6px 0 0';
+        };
+      }
+      wire();
+    });
+    </script>
     """
 
     # ---- player panel (bottom, hidden until a layer is on) -------------------
