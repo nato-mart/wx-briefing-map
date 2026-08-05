@@ -817,11 +817,6 @@ def build_map(airports, pseudos, route_name, out_path):
     """
     m.get_root().html.add_child(folium.Element(join_css))
 
-    title = (f'<h3 style="position:fixed;top:10px;left:50px;z-index:9999;'
-             f'background:#1a1a1a;color:#eee;border:1px solid #444;'
-             f'padding:6px 12px;border-radius:6px;font-family:sans-serif">'
-             f'MSB briefing — {route_name}</h3>')
-    m.get_root().html.add_child(folium.Element(title))
     m.save(out_path)
     return out_path, len(ap), len(ps)
 
