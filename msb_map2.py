@@ -833,6 +833,21 @@ def main():
     if not url:
         raise SystemExit(f'Could not find a briefing matching "{ROUTE_NAME}".')
 
+    # DEBUG: set MSB_DUMP=1 to save the raw briefing HTML and flattened text
+    # so the page structure (TAF/NOTAM/winds sections) can be inspected. This
+    # writes msb_debug.html and msb_debug.txt next to the script, then exits.
+    if os.environ.get("MSB_DUMP"):
+        raw = session.get(url).content
+        with open("msb_debug.html", "wb") as fh:
+            fh.write(raw)
+        text_dump = BeautifulSoup(raw, "html.parser").get_text("\n")
+        with open("msb_debug.txt", "w", encoding="utf-8") as fh:
+            fh.write(text_dump)
+        print("Wrote msb_debug.html and msb_debug.txt. Inspect these for the "
+              "TAF / NOTAM / winds sections, then share the relevant parts.",
+              file=sys.stderr)
+        return
+
     text = scrape_page_text(session, url)
     airports = parse_airports(text)
     pseudos = parse_pseudos(text)
