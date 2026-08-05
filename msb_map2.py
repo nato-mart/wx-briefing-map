@@ -196,7 +196,7 @@ def decode(report):
     if "CAVOK" in report:
         parts.append("CAVOK (vis ≥10 km, no cloud below 5000 ft / sig wx)")
     else:
-        mv = re.search(r"\bKT\s+(\d{4})(?:NDV)?\b", report)
+        mv = re.search(r"KT\s+(\d{4})(?:NDV)?\b", report)
         if mv:
             v = int(mv.group(1))
             parts.append("Visibility ≥10 km" if v >= 9999 else f"Visibility {v:,} m")
@@ -235,6 +235,122 @@ def decode(report):
     if "NOSIG" in report:
         parts.append("No significant change expected (2h)")
     return parts
+
+
+# ---------------------------------------------------------------------------
+# Structured decode -> the shape the Design app's AIRPORT_DB expects.
+# Fills what the METAR provides; TAF/NOTAM/winds are best-effort and fall
+# back to honest placeholders when not available from the scrape.
+# ---------------------------------------------------------------------------
+def _flight_category(report):
+    """VFR / MVFR / IFR / LIFR from ceiling (ft) and visibility (m).
+    Uses standard ICAO-ish thresholds adapted to metres."""
+    # visibility in metres
+    vis_m = 10000
+    if "CAVOK" in report:
+        vis_m = 10000
+    else:
+        mv = re.search(r"KT\s+(\d{4})(?:NDV)?\b", report)
+        if mv:
+            vis_m = int(mv.group(1))
+            if vis_m >= 9999:
+                vis_m = 10000
+    # ceiling = lowest BKN/OVC base in ft
+    ceiling = 99999
+    for cm in re.finditer(r"\b(BKN|OVC)(\d{3})(?:///)?\b", report):
+        ceiling = min(ceiling, int(cm.group(2)) * 100)
+    # thresholds (feet / metres)
+    if ceiling < 500 or vis_m < 1600:
+        return "LIFR"
+    if ceiling < 1000 or vis_m < 5000:
+        return "IFR"
+    if ceiling < 3000 or vis_m < 8000:
+        return "MVFR"
+    return "VFR"
+
+
+def _structured_metar(report):
+    """Return (metarDecoded list of {label,value}, issued 'HH:MMZ' or '')."""
+    out = []
+    issued = ""
+    m = re.search(r"\b(\d{2})(\d{2})(\d{2})Z\b", report)
+    if m:
+        issued = f"{m.group(2)}:{m.group(3)}Z"
+    # wind
+    m = re.search(r"\b(\d{3}|VRB)(\d{2,3})(?:G(\d{2,3}))?KT", report)
+    if m:
+        d, spd, gust = m.groups()
+        wd = "VRB" if d == "VRB" else f"{int(d)}°"
+        val = f"{wd} @ {int(spd)}kt" + (f" gust {int(gust)}" if gust else "")
+        out.append({"label": "Wind", "value": val})
+    # visibility
+    if "CAVOK" in report:
+        out.append({"label": "Visibility", "value": "CAVOK"})
+    else:
+        mv = re.search(r"KT\s+(\d{4})(?:NDV)?\b", report)
+        if mv:
+            v = int(mv.group(1))
+            out.append({"label": "Visibility",
+                        "value": "10 km+" if v >= 9999 else f"{v:,} m"})
+    # sky
+    cloud_words = {"FEW": "Few", "SCT": "Scattered", "BKN": "Broken", "OVC": "Overcast"}
+    sky = []
+    for cm in re.finditer(r"\b(FEW|SCT|BKN|OVC)(\d{3})(?:///)?\b", report):
+        sky.append(f"{cloud_words[cm.group(1)]} {int(cm.group(2))*100:,} ft")
+    if "NSC" in report or "CAVOK" in report and not sky:
+        sky.append("No significant cloud")
+    if sky:
+        out.append({"label": "Sky", "value": " / ".join(sky)})
+    # temp/dewpoint
+    m = re.search(r"\b(M?\d{2})/(M?\d{2})\b", report)
+    if m:
+        t = lambda x: -int(x[1:]) if x.startswith("M") else int(x)
+        out.append({"label": "Temp / Dewpoint",
+                    "value": f"{t(m.group(1))}° / {t(m.group(2))}°C"})
+    # QNH
+    m = re.search(r"\bQ(\d{4})\b", report) or re.search(r"\b(\d{4})\s+MSL", report)
+    if m:
+        out.append({"label": "QNH", "value": f"{int(m.group(1))} hPa"})
+    return out, issued
+
+
+# module-level containers the parsers can populate if the page has the data.
+# Keyed by ICAO/station code. Left empty -> app shows honest placeholders.
+TAF_BY_CODE = {}
+NOTAMS_BY_CODE = {}
+WINDS_BY_CODE = {}
+
+
+def build_airport_db(airports, pseudos):
+    """Produce a dict in the shape the Design app's AIRPORT_DB expects."""
+    db = {}
+    for item in airports + pseudos:
+        code = item["code"]
+        report = item["report"]
+        # strip the "METAR "/"PsMETAR " prefix for the raw display
+        raw = re.sub(r"^(METAR|PsMETAR)\s+", "", report).rstrip("=").strip()
+        decoded, issued = _structured_metar(report)
+        entry = {
+            "code": code,
+            "name": item["name"],
+            "flightCat": _flight_category(report),
+            "metarRaw": raw,
+            "metarTime": (f"Observed {issued}" if issued else "Observed —"),
+            "metarDecoded": decoded,
+            "tafRaw": TAF_BY_CODE.get(code, "TAF not available in this briefing"),
+            "notams": NOTAMS_BY_CODE.get(code, []),
+            "windsAloft": WINDS_BY_CODE.get(code, []),
+        }
+        db[code] = entry
+    return db
+
+
+def write_airport_data_js(db, path):
+    """Write window.__AIRPORT_DB = {...} for the page to consume."""
+    payload = json.dumps(db, ensure_ascii=False, indent=2)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write("window.__AIRPORT_DB = " + payload + ";\n")
+    print(f"Wrote airport data ({len(db)} stations) to {path}", file=sys.stderr)
 
 
 # ---------------------------------------------------------------------------
@@ -715,6 +831,11 @@ def main():
     out, n_ap, n_ps = build_map(airports, pseudos, ROUTE_NAME, out_path)
     print(f"Plotted {n_ap} airports + {n_ps} pseudo-stations.", file=sys.stderr)
     print(f"Map written to {out}", file=sys.stderr)
+
+    # Also emit structured data for the Design app to consume.
+    db = build_airport_db(airports, pseudos)
+    data_path = os.environ.get("MSB_DATA_OUT", "airport_data.js")
+    write_airport_data_js(db, data_path)
 
 
 if __name__ == "__main__":
