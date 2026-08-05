@@ -19,6 +19,7 @@ import io
 import os
 import re
 import sys
+from datetime import datetime, timedelta, timezone
 from getpass import getpass
 from urllib.parse import urljoin, urlparse, parse_qs
 
@@ -29,6 +30,23 @@ from PIL import Image
 BASE = "https://briefing.met.ie/"
 ROUTE_NAME = "Maritime Patrol"
 OUT_DIR = os.environ.get("MSB_CHARTS_OUT", "charts")
+
+# --- Met Office surface-pressure charts (public, no login) ------------------
+# The page's raw HTML contains the chart image URLs (no JS needed). Each URL is
+#   .../v1/surface-pressure/colour/{issueDatetime}/{name}_{stepHours}.gif
+# and the chart's VALID time = issue datetime + step hours. We keep the freshest
+# issue per valid time, then pick the most recent valid time that isn't in the
+# future (the current analysis) as the "latest" chart to show. Logic mirrors the
+# user's existing briefing tool.
+PRESSURE_PAGE = "https://weather.metoffice.gov.uk/maps-and-charts/surface-pressure"
+PRESSURE_RE = re.compile(
+    r"https://data\.consumer-digital\.api\.metoffice\.gov\.uk/"
+    r"v1/surface-pressure/colour/"
+    r"(\d{4}-\d{2}-\d{2}T\d{4})/"          # issue datetime
+    r"[A-Za-z0-9]+_(\d{2,3})\.gif",        # chart name + step hours
+    re.I,
+)
+PRESSURE_HEADERS = {"User-Agent": "Mozilla/5.0 (briefing tool; personal use)"}
 
 # Charts are served rotated 90°. Rotating by +90 (counter-clockwise) usually
 # rights them. If they come out upside-down or still sideways, try 270 or -90.
@@ -185,6 +203,55 @@ def download_charts(session, charts, out_dir=OUT_DIR):
     return saved
 
 
+def discover_pressure_charts():
+    """Parse the Met Office surface-pressure page for colour chart URLs.
+    Returns {valid_datetime: url}, keeping the freshest issue (smallest step)
+    for each valid time. No login required. Mirrors the user's briefing tool."""
+    r = requests.get(PRESSURE_PAGE, headers=PRESSURE_HEADERS, timeout=30)
+    r.raise_for_status()
+    charts = {}   # valid_dt -> (step, url)
+    for m in PRESSURE_RE.finditer(r.text):
+        issue = datetime.strptime(m.group(1), "%Y-%m-%dT%H%M").replace(tzinfo=timezone.utc)
+        step = int(m.group(2))
+        valid = issue + timedelta(hours=step)
+        if valid not in charts or step < charts[valid][0]:
+            charts[valid] = (step, m.group(0))
+    return {valid: url for valid, (step, url) in charts.items()}
+
+
+def download_latest_pressure(out_dir=OUT_DIR):
+    """Fetch the most recent surface-pressure ANALYSIS (the latest valid time
+    that isn't in the future) and save it as pressure_latest.gif so the app can
+    link a fixed filename. Best-effort: on any failure, prints a note and
+    returns None rather than breaking the rest of the chart run."""
+    try:
+        available = discover_pressure_charts()
+    except Exception as e:
+        print(f"  surface pressure: page fetch failed ({e}); skipped.", file=sys.stderr)
+        return None
+    if not available:
+        print("  surface pressure: no charts found on page; skipped.", file=sys.stderr)
+        return None
+    now = datetime.now(timezone.utc)
+    # most recent valid time at or before now = the current analysis
+    past = [t for t in available if t <= now]
+    chosen = max(past) if past else min(available)
+    url = available[chosen]
+    try:
+        img = requests.get(url, headers=PRESSURE_HEADERS, timeout=30)
+        img.raise_for_status()
+    except Exception as e:
+        print(f"  surface pressure: image fetch failed ({e}); skipped.", file=sys.stderr)
+        return None
+    os.makedirs(out_dir, exist_ok=True)
+    # keep native extension (.gif); app links pressure_latest.gif
+    fname = os.path.join(out_dir, "pressure_latest.gif")
+    with open(fname, "wb") as fh:
+        fh.write(img.content)
+    print(f"  surface pressure: {chosen:%Y-%m-%d %H%M}Z  -> {fname}", file=sys.stderr)
+    return fname
+
+
 def main():
     session = requests.Session()
     login(session)
@@ -199,9 +266,12 @@ def main():
     for c in charts:
         print(f"  {c['type']:22s} {c['time']}", file=sys.stderr)
 
-    print("\nDownloading...", file=sys.stderr)
+    print("\nDownloading MSB charts...", file=sys.stderr)
     saved = download_charts(session, charts)
-    print(f"\nSaved {len(saved)} charts to ./{OUT_DIR}/", file=sys.stderr)
+    print(f"Saved {len(saved)} MSB charts to ./{OUT_DIR}/", file=sys.stderr)
+
+    print("\nFetching Met Office surface pressure (latest analysis)...", file=sys.stderr)
+    download_latest_pressure()
 
 
 if __name__ == "__main__":
