@@ -48,6 +48,15 @@ PRESSURE_RE = re.compile(
 )
 PRESSURE_HEADERS = {"User-Agent": "Mozilla/5.0 (briefing tool; personal use)"}
 
+# --- Met Éireann visible satellite (EUMETSAT METEOSAT-11, © EUMETSAT) --------
+# Images are published every 15 min at a timestamped URL:
+#   https://www.met.ie/images/satellite/web17_sat_irl_vis_YYYYMMDDHHMM.jpeg
+# We construct the most recent N frames by rounding "now" down to a 15-min slot
+# and stepping back, so we can animate them in the app. No scraping needed.
+SAT_URL_FMT = "https://www.met.ie/images/satellite/web17_sat_irl_vis_%Y%m%d%H%M.jpeg"
+SAT_FRAMES = 8            # most recent + previous 7
+SAT_HEADERS = {"User-Agent": "Mozilla/5.0 (briefing tool; personal use)"}
+
 # Charts are served rotated 90°. Rotating by +90 (counter-clockwise) usually
 # rights them. If they come out upside-down or still sideways, try 270 or -90.
 ROTATE_DEGREES = 90
@@ -288,6 +297,67 @@ def download_pressure_charts(out_dir=OUT_DIR):
     return charts_meta
 
 
+def download_satellite(out_dir=OUT_DIR):
+    """Download the most recent SAT_FRAMES visible-satellite images (15-min
+    steps) and write satellite.js setting window.__SAT_FRAMES (oldest->newest
+    list of {time,src}) for the app to animate. Best-effort.
+
+    The newest published slot may lag a little, so we probe backwards from the
+    current 15-min slot to find the latest one that actually exists, then take
+    that plus the previous frames."""
+    now = datetime.now(timezone.utc)
+    # round down to the current 15-min slot
+    slot = now - timedelta(minutes=now.minute % 15,
+                           seconds=now.second, microseconds=now.microsecond)
+
+    # find the newest slot that actually exists (probe back up to 4 slots = 1h)
+    newest = None
+    for back in range(0, 5):
+        t = slot - timedelta(minutes=15 * back)
+        url = t.strftime(SAT_URL_FMT)
+        try:
+            r = requests.head(url, headers=SAT_HEADERS, timeout=15)
+            if r.status_code == 200:
+                newest = t
+                break
+        except Exception:
+            continue
+    if newest is None:
+        print("  satellite: no recent frame found; skipped.", file=sys.stderr)
+        return None
+
+    os.makedirs(out_dir, exist_ok=True)
+    frames = []
+    # take newest and the previous (SAT_FRAMES-1), oldest first for animation
+    for back in range(SAT_FRAMES - 1, -1, -1):
+        t = newest - timedelta(minutes=15 * back)
+        url = t.strftime(SAT_URL_FMT)
+        try:
+            r = requests.get(url, headers=SAT_HEADERS, timeout=20)
+            r.raise_for_status()
+        except Exception as e:
+            print(f"    sat {t:%H%M}Z: fetch failed ({e}); skipped.", file=sys.stderr)
+            continue
+        fname = f"sat_vis_{t:%Y%m%d%H%M}.jpeg"
+        with open(os.path.join(out_dir, fname), "wb") as fh:
+            fh.write(r.content)
+        frames.append({"time": f"{t:%H:%M}Z", "src": f"./charts/{fname}"})
+        print(f"    sat {t:%H%M}Z -> {fname}", file=sys.stderr)
+
+    if not frames:
+        print("  satellite: nothing saved; skipped.", file=sys.stderr)
+        return None
+
+    data_path = os.environ.get(
+        "MSB_SAT_JS", os.path.normpath(os.path.join(out_dir, "..", "satellite.js")))
+    with open(data_path, "w", encoding="utf-8") as fh:
+        fh.write("window.__SAT_FRAMES = " +
+                 __import__("json").dumps(frames, ensure_ascii=False) + ";\n")
+    print(f"  satellite: {len(frames)} frames, newest {newest:%H%M}Z "
+          f"-> {data_path}", file=sys.stderr)
+    return frames
+
+
 def main():
     session = requests.Session()
     login(session)
@@ -308,6 +378,9 @@ def main():
 
     print("\nFetching Met Office surface pressure charts...", file=sys.stderr)
     download_pressure_charts()
+
+    print("\nFetching visible satellite frames...", file=sys.stderr)
+    download_satellite()
 
 
 if __name__ == "__main__":
