@@ -196,7 +196,9 @@ def decode(report):
     if "CAVOK" in report:
         parts.append("CAVOK (vis ≥10 km, no cloud below 5000 ft / sig wx)")
     else:
-        mv = re.search(r"KT\s+(\d{4})(?:NDV)?\b", report)
+        mw = re.search(r"(\d{3}|VRB)\d{2,3}(?:G\d{2,3})?KT", report)
+        after = report[mw.end():] if mw else report
+        mv = re.search(r"(?<!\d)(\d{4})(?:NDV)?(?!\d)", after)
         if mv:
             v = int(mv.group(1))
             parts.append("Visibility ≥10 km" if v >= 9999 else f"Visibility {v:,} m")
@@ -250,7 +252,9 @@ def _flight_category(report):
     if "CAVOK" in report:
         vis_m = 10000
     else:
-        mv = re.search(r"KT\s+(\d{4})(?:NDV)?\b", report)
+        mw = re.search(r"(\d{3}|VRB)\d{2,3}(?:G\d{2,3})?KT", report)
+        after = report[mw.end():] if mw else report
+        mv = re.search(r"(?<!\d)(\d{4})(?:NDV)?(?!\d)", after)
         if mv:
             vis_m = int(mv.group(1))
             if vis_m >= 9999:
@@ -282,14 +286,22 @@ def _structured_metar(report):
         d, spd, gust = m.groups()
         wd = "VRB" if d == "VRB" else f"{int(d)}°"
         val = f"{wd} @ {int(spd)}kt" + (f" gust {int(gust)}" if gust else "")
+        # variable wind direction band, e.g. 240V310 -> "(var 240°–310°)"
+        mv = re.search(r"\b(\d{3})V(\d{3})\b", report)
+        if mv:
+            val += f" (var {int(mv.group(1))}°\u2013{int(mv.group(2))}°)"
         out.append({"label": "Wind", "value": val})
     # visibility
     if "CAVOK" in report:
         out.append({"label": "Visibility", "value": "CAVOK"})
     else:
-        mv = re.search(r"KT\s+(\d{4})(?:NDV)?\b", report)
-        if mv:
-            v = int(mv.group(1))
+        # A standalone 4-digit group (optionally NDV) is the visibility in
+        # metres. Search after the wind so we don't catch the time; the group
+        # may be separated from KT by a variable-wind band (e.g. 240V310).
+        after = report[m.end():] if m else report
+        mvis = re.search(r"(?<!\d)(\d{4})(NDV)?(?!\d)", after)
+        if mvis:
+            v = int(mvis.group(1))
             out.append({"label": "Visibility",
                         "value": "10 km+" if v >= 9999 else f"{v:,} m"})
     # sky
@@ -312,6 +324,36 @@ def _structured_metar(report):
     if m:
         out.append({"label": "QNH", "value": f"{int(m.group(1))} hPa"})
 
+    # Remarks: anything meaningful AFTER the QNH group — wind shear (WS RWYnn),
+    # trend groups (NOSIG / TEMPO / BECMG ...), RMK sections, recent weather
+    # (RExx), etc. We take the tail of the report from just after the QNH and
+    # tidy up common codes into readable text, leaving the rest as-is so nothing
+    # is silently dropped.
+    remarks = ""
+    if m:
+        tail = report[m.end():].strip().strip("=").strip()
+        if tail:
+            # human-friendly expansions for the most common codes
+            expansions = [
+                (r"\bWS\s+ALL\s+RWY\b", "wind shear all runways"),
+                (r"\bWS\s+RWY\s*(\d{2}[LCR]?)\b", r"wind shear runway \1"),
+                (r"\bNOSIG\b", "no significant change expected"),
+                (r"\bTEMPO\b", "temporary:"),
+                (r"\bBECMG\b", "becoming:"),
+                (r"\bRMK\b", "remark:"),
+            ]
+            # Insert a separator before each distinct trend/shear group so
+            # multiple remarks read clearly, then expand codes to words.
+            tail = re.sub(r"\s+(WS|NOSIG|TEMPO|BECMG|RMK)\b", " \u00b7 \\1", tail)
+            tail = tail.lstrip("\u00b7 ").strip()
+            pretty = tail
+            for pat, rep in expansions:
+                pretty = re.sub(pat, rep, pretty)
+            pretty = re.sub(r"\s+", " ", pretty).strip()
+            remarks = pretty
+    if remarks:
+        out.append({"label": "Remarks", "value": remarks})
+
     # The Design app REQUIRES these four labels to exist (it does
     # metarDecoded.find(label===X).value). Guarantee each is present; fill any
     # the METAR didn't provide with a dash so the app never crashes.
@@ -320,7 +362,8 @@ def _structured_metar(report):
         if required not in have:
             out.append({"label": required, "value": "—"})
     # keep a stable order: required fields first in canonical order, then extras
-    order = {"Wind": 0, "Visibility": 1, "Sky": 2, "Temp / Dewpoint": 3, "QNH": 4}
+    order = {"Wind": 0, "Visibility": 1, "Sky": 2, "Temp / Dewpoint": 3, "QNH": 4,
+             "Remarks": 5}
     out.sort(key=lambda d: order.get(d["label"], 99))
     return out, issued
 
