@@ -219,37 +219,73 @@ def discover_pressure_charts():
     return {valid: url for valid, (step, url) in charts.items()}
 
 
-def download_latest_pressure(out_dir=OUT_DIR):
-    """Fetch the most recent surface-pressure ANALYSIS (the latest valid time
-    that isn't in the future) and save it as pressure_latest.gif so the app can
-    link a fixed filename. Best-effort: on any failure, prints a note and
-    returns None rather than breaking the rest of the chart run."""
+def download_pressure_charts(out_dir=OUT_DIR):
+    """Download ALL available Met Office surface-pressure colour charts (analysis
+    + forecast steps), save each locally, and write pressure_charts.js setting
+    window.__PRESSURE_CHARTS (list of {validity,label,src}) and __PRESSURE_ISSUED
+    for the app's pressure viewer. Best-effort; on failure writes nothing extra.
+
+    Follows the user's briefing-tool logic: discover charts keyed by valid time,
+    freshest issue per valid time. Here we keep the most recent issue cycle and
+    present its steps (T+0 analysis onward) so the viewer pages through them."""
     try:
-        available = discover_pressure_charts()
+        r = requests.get(PRESSURE_PAGE, headers=PRESSURE_HEADERS, timeout=30)
+        r.raise_for_status()
     except Exception as e:
         print(f"  surface pressure: page fetch failed ({e}); skipped.", file=sys.stderr)
         return None
-    if not available:
-        print("  surface pressure: no charts found on page; skipped.", file=sys.stderr)
+
+    # collect (issue, step, valid, url) for every colour chart on the page
+    entries = []
+    for m in PRESSURE_RE.finditer(r.text):
+        issue = datetime.strptime(m.group(1), "%Y-%m-%dT%H%M").replace(tzinfo=timezone.utc)
+        step = int(m.group(2))
+        entries.append((issue, step, issue + timedelta(hours=step), m.group(0)))
+    if not entries:
+        print("  surface pressure: no charts found; skipped.", file=sys.stderr)
         return None
-    now = datetime.now(timezone.utc)
-    # most recent valid time at or before now = the current analysis
-    past = [t for t in available if t <= now]
-    chosen = max(past) if past else min(available)
-    url = available[chosen]
-    try:
-        img = requests.get(url, headers=PRESSURE_HEADERS, timeout=30)
-        img.raise_for_status()
-    except Exception as e:
-        print(f"  surface pressure: image fetch failed ({e}); skipped.", file=sys.stderr)
-        return None
+
+    # Use the most recent ISSUE cycle (the freshest run), then its steps in order.
+    latest_issue = max(e[0] for e in entries)
+    cycle = sorted((e for e in entries if e[0] == latest_issue), key=lambda e: e[1])
+
     os.makedirs(out_dir, exist_ok=True)
-    # keep native extension (.gif); app links pressure_latest.gif
-    fname = os.path.join(out_dir, "pressure_latest.gif")
-    with open(fname, "wb") as fh:
-        fh.write(img.content)
-    print(f"  surface pressure: {chosen:%Y-%m-%d %H%M}Z  -> {fname}", file=sys.stderr)
-    return fname
+    charts_meta = []
+    for issue, step, valid, url in cycle:
+        try:
+            img = requests.get(url, headers=PRESSURE_HEADERS, timeout=30)
+            img.raise_for_status()
+        except Exception as e:
+            print(f"    step T+{step}: fetch failed ({e}); skipped.", file=sys.stderr)
+            continue
+        fname = f"pressure_{step:03d}.gif"
+        with open(os.path.join(out_dir, fname), "wb") as fh:
+            fh.write(img.content)
+        validity = "T+0 (Analysis)" if step == 0 else f"T+{step}"
+        label = f"{valid:%d/%m} {valid:%H}Z"
+        charts_meta.append({"validity": validity, "label": label,
+                            "src": f"./charts/{fname}"})
+        print(f"    {validity:14s} {label}  -> {fname}", file=sys.stderr)
+
+    if not charts_meta:
+        print("  surface pressure: nothing saved; skipped.", file=sys.stderr)
+        return None
+
+    # human-readable issued string, e.g. "0000Z Wed 05 Aug 2026"
+    issued_str = f"{latest_issue:%H%M}Z {latest_issue:%a %d %b %Y}"
+    data_path = os.path.join(out_dir, "..", "pressure_charts.js")
+    data_path = os.path.normpath(data_path)
+    # write next to the web root (same folder pattern as airport_data.js);
+    # allow override via env for flexibility
+    data_path = os.environ.get("MSB_PRESSURE_JS", data_path)
+    with open(data_path, "w", encoding="utf-8") as fh:
+        fh.write("window.__PRESSURE_CHARTS = " +
+                 __import__("json").dumps(charts_meta, ensure_ascii=False) + ";\n")
+        fh.write("window.__PRESSURE_ISSUED = " +
+                 __import__("json").dumps(issued_str) + ";\n")
+    print(f"  surface pressure: {len(charts_meta)} charts, issued {issued_str} "
+          f"-> {data_path}", file=sys.stderr)
+    return charts_meta
 
 
 def main():
@@ -270,8 +306,8 @@ def main():
     saved = download_charts(session, charts)
     print(f"Saved {len(saved)} MSB charts to ./{OUT_DIR}/", file=sys.stderr)
 
-    print("\nFetching Met Office surface pressure (latest analysis)...", file=sys.stderr)
-    download_latest_pressure()
+    print("\nFetching Met Office surface pressure charts...", file=sys.stderr)
+    download_pressure_charts()
 
 
 if __name__ == "__main__":
