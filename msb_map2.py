@@ -791,14 +791,10 @@ def build_map(airports, pseudos, route_name, out_path):
     margin = 0.6  # degrees
     sw = [min(lats) - margin, min(lons) - margin]
     ne = [max(lats) + margin, max(lons) + margin]
-    m = folium.Map(location=[lat0, lon0], tiles=None,
-                   min_zoom=5,
-                   max_bounds=True,
-                   min_lat=sw[0] - 2, max_lat=ne[0] + 2,
-                   min_lon=sw[1] - 3, max_lon=ne[1] + 3)
+    m = folium.Map(location=[lat0, lon0], tiles=None)
     # dark basemap, but not shown as a toggle in the layer control
     folium.TileLayer("CartoDB dark_matter", control=False).add_to(m)
-    # frame the map tightly on the stations (overrides any default zoom)
+    # open framed on the stations, but the map pans/zooms freely from there
     m.fit_bounds([sw, ne])
 
     # animated radar + EUMETSAT cloud, sharing one player (top-right toggles)
